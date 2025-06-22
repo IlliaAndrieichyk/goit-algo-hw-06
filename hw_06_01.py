@@ -1,5 +1,20 @@
 from collections import UserDict
+from datetime import datetime, timedelta
 import re
+import pickle
+from typing import Callable
+
+def input_error(func):
+    def inner(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except KeyError:
+            return "No such contact found."
+        except ValueError as e:
+            return str(e)
+        except IndexError:
+            return "Enter the argument for the command."
+    return inner
 
 class Field:
     def __init__(self, value):
@@ -17,10 +32,19 @@ class Phone(Field):
             raise ValueError("Phone number must be 10 digits.")
         super().__init__(value)
 
+class Birthday(Field):
+    def __init__(self, value):
+        try:
+            datetime.strptime(value, '%d.%m.%Y')
+        except ValueError:
+            raise ValueError("Invalid date format. Use DD.MM.YYYY")
+        super().__init__(value)
+
 class Record:
     def __init__(self, name):
         self.name = Name(name)
         self.phones = []
+        self.birthday = None
 
     def add_phone(self, phone_number):
         self.phones.append(Phone(phone_number))
@@ -33,12 +57,12 @@ class Record:
             raise ValueError("Phone number not found.")
 
     def edit_phone(self, old_phone_number, new_phone_number):
-        phone_to_edit = self.find_phone(old_phone_number)
-        if phone_to_edit:
-            self.remove_phone(old_phone_number)
-            self.add_phone(new_phone_number)
-        else:
-            raise ValueError("Phone number not found.")
+        new_phone = Phone(new_phone_number)  # Validate before modifying existing data
+        for idx, phone in enumerate(self.phones):
+            if phone.value == old_phone_number:
+                self.phones[idx] = new_phone
+                return
+        raise ValueError("Phone number not found.")
 
     def find_phone(self, phone_number):
         for phone in self.phones:
@@ -46,8 +70,13 @@ class Record:
                 return phone
         return None
 
+    def add_birthday(self, birthday):
+        self.birthday = Birthday(birthday)
+
     def __str__(self):
-        return f"Contact name: {self.name.value}, phones: {'; '.join(p.value for p in self.phones)}"
+        phones_str = '; '.join(p.value for p in self.phones)
+        birthday_str = self.birthday.value if self.birthday else "N/A"
+        return f"Contact name: {self.name.value}, phones: {phones_str}, birthday: {birthday_str}"
 
 class AddressBook(UserDict):
     def add_record(self, record):
@@ -62,31 +91,134 @@ class AddressBook(UserDict):
         else:
             raise KeyError("Contact not found.")
 
+    def get_upcoming_birthdays(self):
+        today = datetime.today()
+        upcoming_birthdays = []
+        for record in self.data.values():
+            if record.birthday:
+                bday = datetime.strptime(record.birthday.value, "%d.%m.%Y")
+                birthday_this_year = bday.replace(year=today.year)
+                if birthday_this_year.date() < today.date():
+                    birthday_this_year = birthday_this_year.replace(year=today.year + 1)
+                days_until_birthday = (birthday_this_year.date() - today.date()).days
+                if 0 <= days_until_birthday <= 7:
+                    if birthday_this_year.weekday() >= 5:
+                        birthday_this_year += timedelta(days=(7 - birthday_this_year.weekday()))
+                    upcoming_birthdays.append({"name": record.name.value, "birthday": birthday_this_year.strftime('%d.%m.%Y')})
+        return upcoming_birthdays
+
     def __str__(self):
         return "\n".join(str(record) for record in self.data.values())
 
-# Test
+def save_data(book, filename="addressbook.pkl"):
+    with open(filename, "wb") as f:
+        pickle.dump(book, f)
 
-book = AddressBook()
+def load_data(filename="addressbook.pkl"):
+    try:
+        with open(filename, "rb") as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        return AddressBook()
 
-john_record = Record("John")
-john_record.add_phone("1234567890")
-john_record.add_phone("5555555555")
+def parse_input(user_input):
+    parts = user_input.strip().split()
+    if not parts:
+        return "", []
+    cmd = parts[0].lower()
+    args = parts[1:]
+    return cmd, args
 
-book.add_record(john_record)
+@input_error
+def add_contact(args, book: AddressBook):
+    name, phone, *_ = args
+    record = book.find(name)
+    message = "Contact updated."
+    if record is None:
+        record = Record(name)
+        book.add_record(record)
+        message = "Contact added."
+    if phone:
+        record.add_phone(phone)
+    return message
 
-jane_record = Record("Jane")
-jane_record.add_phone("9876543210")
-book.add_record(jane_record)
+@input_error
+def change_contact(args, book: AddressBook):
+    name, old_phone, new_phone = args
+    record = book.find(name)
+    if record:
+        record.edit_phone(old_phone, new_phone)
+        return "Contact updated."
+    return "Contact not found."
 
-print(book)
+@input_error
+def show_phone(args, book: AddressBook):
+    name = args[0]
+    record = book.find(name)
+    if record:
+        return ", ".join(phone.value for phone in record.phones)
+    return "Contact not found."
 
-john = book.find("John")
-if john:
-    john.edit_phone("1234567890", "1112223333")
-    print(john)  
-found_phone = john.find_phone("5555555555")
-print(f"{john.name}: {found_phone}")  
+@input_error
+def show_all(args, book: AddressBook):
+    return str(book)
 
-book.delete("Jane")
-print(book)  
+@input_error
+def add_birthday(args, book: AddressBook):
+    name, birthday = args
+    record = book.find(name)
+    if record:
+        record.add_birthday(birthday)
+        return "Birthday added."
+    return "Contact not found."
+
+@input_error
+def show_birthday(args, book: AddressBook):
+    name = args[0]
+    record = book.find(name)
+    if record and record.birthday:
+        return record.birthday.value
+    return "Contact or birthday not found."
+
+@input_error
+def birthdays(args, book: AddressBook):
+    upcoming_birthdays = book.get_upcoming_birthdays()
+    if upcoming_birthdays:
+        return "\n".join(f"{entry['name']}: {entry['birthday']}" for entry in upcoming_birthdays)
+    return "No upcoming birthdays."
+
+def main():
+    book = load_data()
+    print("Welcome to the assistant bot!")
+    while True:
+        user_input = input("Enter a command: ")
+        command, args = parse_input(user_input)
+
+        if not command:
+            continue
+
+        if command in ["close", "exit"]:
+            save_data(book)
+            print("Good bye!")
+            break
+        elif command == "hello":
+            print("How can I help you?")
+        elif command == "add":
+            print(add_contact(args, book))
+        elif command == "change":
+            print(change_contact(args, book))
+        elif command == "phone":
+            print(show_phone(args, book))
+        elif command == "all":
+            print(show_all(args, book))
+        elif command == "add-birthday":
+            print(add_birthday(args, book))
+        elif command == "show-birthday":
+            print(show_birthday(args, book))
+        elif command == "birthdays":
+            print(birthdays(args, book))
+        else:
+            print("Invalid command.")
+
+if __name__ == "__main__":
+    main()
